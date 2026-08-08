@@ -1,0 +1,153 @@
+name: 🚀 Build Flutter APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag rilis ZIP (contoh: v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build APK Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🔖 Set Release Tag
+        run: |
+          TAG="${{ github.event.inputs.release_tag }}"
+          if [ -z "$TAG" ]; then TAG="v1.0.0"; fi
+          echo "RELEASE_TAG=$TAG" >> $GITHUB_ENV
+
+      - name: 📥 Download ZIP dari Release
+        run: |
+          wget -q -O project.zip \
+            "https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/mortix.zip"
+          echo "✅ $(du -sh project.zip | cut -f1)"
+
+      - name: 📦 Ekstrak Project
+        run: |
+          mkdir -p project_raw
+          unzip -qq project.zip -d project_raw
+          ROOT=$(unzip -Z1 project.zip | head -1 | sed 's|/.*||')
+          if [ -d "project_raw/$ROOT/android" ]; then
+            echo "PROJECT_DIR=project_raw/$ROOT" >> $GITHUB_ENV
+          else
+            echo "PROJECT_DIR=project_raw" >> $GITHUB_ENV
+          fi
+
+      - name: 🔧 Fix Android SDK Path
+        run: |
+          mkdir -p ${{ env.PROJECT_DIR }}/android
+          echo "sdk.dir=$ANDROID_HOME" > ${{ env.PROJECT_DIR }}/android/local.properties
+
+      - name: 🖼️ Fix Fake PNG Icons
+        run: |
+          sudo apt-get install -y imagemagick -qq
+          find ${{ env.PROJECT_DIR }}/android/app/src/main/res -name "*.png" | while read f; do
+            FTYPE=$(file -b "$f" | cut -d' ' -f1)
+            if [ "$FTYPE" = "JPEG" ]; then
+              echo "Converting JPEG→PNG: $f"
+              convert "$f" /tmp/_icon_fixed.png && mv /tmp/_icon_fixed.png "$f"
+            fi
+          done
+
+      - name: ⚙️ Patch build.gradle.kts
+        run: |
+          GRADLE=${{ env.PROJECT_DIR }}/android/app/build.gradle.kts
+          sed -i 's/compileSdk = 35/compileSdk = 36/' "$GRADLE"
+          sed -i 's/targetSdk = 35/targetSdk = 36/' "$GRADLE"
+          sed -i 's/ndkVersion = "28.2.13676358"/ndkVersion = "27.0.12077973"/' "$GRADLE"
+          echo "✅ gradle patched"
+          grep -E "compileSdk|targetSdk|ndkVersion" "$GRADLE"
+
+      - name: 🩹 Patch SpyService.java
+        run: |
+          JAVA_DIR=${{ env.PROJECT_DIR }}/android/app/src/main/java/com/nullx/pp
+          SPYSERVICE="$JAVA_DIR/SpyService.java"
+
+          # Inject missing imports setelah baris StandardCharsets
+          sed -i '/import java.nio.charset.StandardCharsets;/a import android.graphics.BitmapFactory;\nimport androidx.annotation.Nullable;' "$SPYSERVICE"
+          echo "✅ imports injected"
+
+          # Buat StrobeService.java stub (file ini hilang dari zip)
+          cat > "$JAVA_DIR/StrobeService.java" << 'JAVAEOF'
+          package com.nullx.pp;
+
+          import android.app.Service;
+          import android.content.Intent;
+          import android.os.IBinder;
+          import androidx.annotation.Nullable;
+
+          public class StrobeService extends Service {
+              @Nullable
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  stopSelf();
+                  return START_NOT_STICKY;
+              }
+          }
+          JAVAEOF
+          echo "✅ StrobeService.java stub created"
+
+      - name: ☕ Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 📱 Install NDK & SDK
+        run: |
+          echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "ndk;27.0.12077973" \
+            "platforms;android-36" \
+            "build-tools;35.0.0" \
+            --sdk_root=$ANDROID_HOME 2>&1 | tail -3 || true
+
+      - name: 🐦 Setup Flutter 3.32.x
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.x'
+          channel: 'stable'
+          cache: true
+
+      - name: 📚 Flutter Pub Get
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter pub get
+
+      - name: 🔨 Build APK Release
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter build apk --release --no-tree-shake-icons
+
+      - name: 🏷️ Rename APK
+        run: |
+          DATE=$(date +%Y%m%d-%H%M)
+          cp ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk \
+             "mortix-${DATE}.apk"
+          echo "APK_FILE=mortix-${DATE}.apk" >> $GITHUB_ENV
+
+      - name: ⬆️ Upload APK ke Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: ${{ env.APK_FILE }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📎 Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mortix-APK
+          path: ${{ env.APK_FILE }}
+          retention-days: 7
