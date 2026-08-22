@@ -1,0 +1,5 @@
+{
+  "baseUrl": "http://host.asta-official.my.id:9235",
+  "updatedAt": "2026-06-27T12:00:00.000Z",
+  "note": "Ganti baseUrl di sini kalau VPS pindah. APK ambil otomatis dari GitHub raw."
+}
